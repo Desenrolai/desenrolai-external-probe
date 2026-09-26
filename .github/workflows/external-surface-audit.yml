@@ -1,0 +1,240 @@
+# Auditoria EXTERNA da superfície do cluster (ADR-0004).
+#
+# Este é o check AUTORITATIVO sobre "a origem está exposta na internet?". O
+# CronJob in-cluster (desenrolai-infra, k8s/cluster/external-surface-audit)
+# audita a CONFIGURAÇÃO do K8s com exatidão, mas a sonda de rede dele roda
+# DENTRO do cluster — e os nodes têm firewall de host com DROP default, então
+# "alcançável de um pod" não implica "alcançável da internet". Só um ponto de
+# vista fora da rede responde isso.
+#
+# ⚠️ runs-on: ubuntu-latest é OBRIGATÓRIO — NÃO troque por [self-hosted, ...].
+# Os runners self-hosted da Desenrolai rodam no ns arc-runners DENTRO do
+# cluster auditado; usá-los aqui transformaria o teste externo em mais um teste
+# interno, e o controle passaria a mentir exatamente no cenário que ele existe
+# para pegar. O gate tests/gate-vantage-point-externo do desenrolai-infra
+# reprova essa troca.
+#
+# ⚠️ POR QUE ESTE WORKFLOW VIVE NUM REPOSITÓRIO PÚBLICO, E O QUE ISSO EXIGE.
+#
+# Ele mora aqui, e não no desenrolai-infra, porque GitHub Actions em runner
+# hospedado é GRATUITO em repositório público. No desenrolai-infra (privado) a
+# franquia esgotou e a sonda ficou 22 dias sem rodar — 12 sucessos em 120
+# execuções — enquanto 185 runs hospedados em repos públicos da org passavam
+# normalmente no mesmo período.
+#
+# O preço é que O LOG DESTE WORKFLOW É PÚBLICO. Qualquer pessoa na internet lê
+# a saída de cada step, sem autenticar. Duas consequências de desenho:
+#
+#   1. NENHUM IP DE NODE PODE CHEGAR AO LOG. Não basta redirecionar stderr
+#      caso a caso: o primeiro step registra `::add-mask::` para CADA IP, antes
+#      de qualquer outro uso, de modo que mesmo um vazamento novo (um `-v`
+#      acrescentado sem pensar, um erro do bash, `ACTIONS_STEP_DEBUG` ligado)
+#      saia como `***`. Os redirecionamentos continuam — são a primeira camada;
+#      a máscara é a que não depende de alguém ter previsto o caminho.
+#
+#   2. O RÓTULO DO NODE NÃO PODE SER HASH DO IP. A versão anterior publicava
+#      `node-$(sha256sum <ip> | cut -c1-12)`. Num log privado isso bastava.
+#      Num log PÚBLICO não é anonimização, é codificação: medido em 26/09/2026,
+#      1,03 milhão de hash/s num núcleo — o espaço IPv4 INTEIRO cai em 1,2 h num
+#      núcleo (~7 min em 8), e um /16 de provedor conhecido cai instantaneamente.
+#      O rótulo aqui é POSICIONAL (`node-1`, `node-2`), derivado da ordem da
+#      lista declarada: não carrega informação recuperável, e quem opera mapeia
+#      índice → node pelo próprio segredo, que só ele lê.
+#
+# Configuração (Settings → Secrets and variables → Actions):
+#
+#   SECRETS (não Variables — ver README.md ao lado):
+#     SURFACE_AUDIT_NODE_IPS        — IPs públicos dos nodes, separados por espaço.
+#     SURFACE_AUDIT_PUBLIC_EDGE_IPS — IPs onde 80/443 devem estar públicos.
+#
+#   VARIABLES (não sensíveis):
+#     SURFACE_AUDIT_HOST        — (opcional) hostname para SNI/Host na prova de
+#                                 bypass. Default: api-bio-dev.desenrol.ai
+#     SURFACE_AUDIT_PORTS       — (opcional) portas auditadas. Default: 80 443 32080 32443
+#     SURFACE_AUDIT_ADMIN_PORTS — (opcional) portas administrativas que devem
+#                                 permanecer inacessíveis. Default: 22 6443.
+# vantage-point: external
+#   ^ marcador declarativo lido por tests/gate-vantage-point-externo do
+#     desenrolai-infra. Um workflow com este marcador NÃO pode rodar em runner
+#     self-hosted: os runners self-hosted da Desenrolai vivem dentro do cluster
+#     que esta sonda audita, e um auditor externo executado lá dentro mede o
+#     próprio lado de dentro e devolve "conforme" sempre.
+name: external-surface-audit
+
+on:
+  schedule:
+    # 4x/dia. Topologia de rede muda raramente; o CronJob in-cluster (*/30) é
+    # quem dá detecção rápida da mudança de configuração.
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Sonda externa dos IPs de node
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      NODE_IPS: ${{ secrets.SURFACE_AUDIT_NODE_IPS }}
+      PUBLIC_EDGE_IPS: ${{ secrets.SURFACE_AUDIT_PUBLIC_EDGE_IPS }}
+      PORTS: ${{ vars.SURFACE_AUDIT_PORTS || '80 443 32080 32443' }}
+      ADMIN_PORTS: ${{ vars.SURFACE_AUDIT_ADMIN_PORTS || '22 6443' }}
+      HOST: ${{ vars.SURFACE_AUDIT_HOST || 'api-bio-dev.desenrol.ai' }}
+    steps:
+      # PRIMEIRO STEP, SEMPRE. A máscara só vale do momento do registro em
+      # diante ("Make sure you register the secret with add-mask before
+      # outputting it in the build logs" — docs de workflow commands). Qualquer
+      # step colocado antes deste escreveria em claro num log público.
+      #
+      # Por que um `::add-mask::` POR IP e não um só com a lista inteira: a
+      # documentação garante o mascaramento do valor registrado; que um valor
+      # multi-palavra seja quebrado e cada palavra mascarada em separado NÃO é
+      # contrato documentado. Registrando um por um, cada IP é um valor próprio.
+      - name: Mascarar IPs antes de qualquer uso
+        run: |
+          set -uo pipefail
+          set +x   # eco de comando expandiria os IPs no log público
+          registrados=0
+          for ip in ${NODE_IPS} ${PUBLIC_EDGE_IPS}; do
+            echo "::add-mask::${ip}"
+            registrados=$((registrados + 1))
+          done
+          if [ "${registrados}" -eq 0 ]; then
+            echo "::error title=Sonda sem alvo::SURFACE_AUDIT_NODE_IPS vazio ou ausente — nada foi mascarado e nada seria auditado"
+            exit 1
+          fi
+          # Conta, nunca valor. Um número aqui é o que prova que o laço rodou.
+          echo "Mascarados ${registrados} endereço(s) antes do primeiro uso."
+
+      - name: Validar configuração
+        run: |
+          set -euo pipefail
+          set +x
+          python3 - "$NODE_IPS" "$PUBLIC_EDGE_IPS" "$ADMIN_PORTS" <<'PY'
+          import ipaddress
+          import sys
+
+          nodes, edges, ports = (value.split() for value in sys.argv[1:])
+          if not nodes:
+              raise SystemExit('::error::SURFACE_AUDIT_NODE_IPS não configurada.')
+          if not edges:
+              raise SystemExit('::error::SURFACE_AUDIT_PUBLIC_EDGE_IPS não configurada.')
+          try:
+              node_addresses = [ipaddress.IPv4Address(value) for value in nodes]
+              edge_addresses = [ipaddress.IPv4Address(value) for value in edges]
+              admin_ports = [int(value) for value in ports]
+          except ValueError:
+              # A mensagem do ValueError contém o valor recusado; num log público
+              # ela não pode escapar. Só a causa genérica sai daqui.
+              raise SystemExit('::error::configuração de IP ou porta inválida.')
+          if len(set(node_addresses)) != len(node_addresses) or len(set(edge_addresses)) != len(edge_addresses):
+              raise SystemExit('::error::configuração contém destinos duplicados.')
+          if not set(edge_addresses).issubset(node_addresses):
+              raise SystemExit('::error::edge declarado não pertence aos nodes auditados.')
+          if not admin_ports or any(port < 1 or port > 65535 for port in admin_ports):
+              raise SystemExit('::error::SURFACE_AUDIT_ADMIN_PORTS inválida.')
+          print('Configuração válida: {} node(s), {} edge(s), {} porta(s) administrativa(s).'.format(
+              len(node_addresses), len(edge_addresses), len(admin_ports)))
+          PY
+
+      - name: Auditar portas de ingress expostas
+        run: |
+          set -uo pipefail
+          set +x
+          violations=0
+          indice=0
+          for ip in ${NODE_IPS}; do
+            indice=$((indice + 1))
+            # Rótulo POSICIONAL. Não derive de hash do IP: ver cabeçalho.
+            target="node-${indice}"
+            for port in ${PORTS}; do
+              expected_open=false
+              if [ "${port}" = "80" ] || [ "${port}" = "443" ]; then
+                for edge_ip in ${PUBLIC_EDGE_IPS}; do
+                  [ "${ip}" = "${edge_ip}" ] && expected_open=true
+                done
+              fi
+
+              # `nc -z` ANUNCIA o endereço em stderr no caminho de SUCESSO
+              # ("Connection to <ip> port 443 [tcp/https] succeeded!" — medido
+              # em 26/09/2026). Justamente o caminho que interessa é o que fala.
+              if nc -z -w 5 "${ip}" "${port}" 2>/dev/null; then
+                if [ "${expected_open}" = "true" ]; then
+                  echo "ok: ${target}:${port} é edge público declarado"
+                  if [ "${port}" = "443" ]; then
+                    code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 \
+                             --resolve "${HOST}:443:${ip}" "https://${HOST}/" 2>/dev/null || true)
+                    if [ "${code}" != "404" ]; then
+                      violations=$((violations + 1))
+                      echo "::error title=Host privado no edge público::${HOST} retornou HTTP ${code} em ${target}:443"
+                    fi
+                  fi
+                  continue
+                fi
+
+                violations=$((violations + 1))
+                echo "::error title=Origem inesperada::${target}:${port} aceita conexão da internet"
+                # Prova de bypass: se o ingress responder com o cert real do
+                # domínio, é o Cloudflare sendo contornado, não uma porta órfã.
+                # `openssl s_client` escreve "Connecting to <ip>" em stderr e o
+                # handshake inteiro em stdout — por isso stderr vai para
+                # /dev/null e stdout entra no pipe, nunca no log.
+                subject=$(echo | openssl s_client -connect "${ip}:${port}" \
+                            -servername "${HOST}" 2>/dev/null \
+                          | openssl x509 -noout -subject 2>/dev/null || true)
+                [ -n "${subject}" ] && echo "  cert apresentado: ${subject}"
+                code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 \
+                         --resolve "${HOST}:${port}:${ip}" "https://${HOST}:${port}/" 2>/dev/null || true)
+                [ -n "${code}" ] && [ "${code}" != "000" ] && echo "  HTTP ${code} servido diretamente por ${target}"
+              else
+                if [ "${expected_open}" = "true" ]; then
+                  violations=$((violations + 1))
+                  echo "::error title=Edge indisponível::${target}:${port} deveria estar aberto"
+                else
+                  echo "ok: ${target}:${port} fechado/filtrado"
+                fi
+              fi
+            done
+          done
+
+          if [ "${indice}" -eq 0 ]; then
+            echo "::error title=Sonda sem alvo::nenhum node auditado — zero alvos não é zero achados"
+            exit 1
+          fi
+
+          if [ "${violations}" -gt 0 ]; then
+            echo "::error::${violations} divergência(s) na superfície externa declarada"
+            exit 1
+          fi
+          echo "Superfície externa conforme em ${indice} node(s): apenas os edges declarados respondem em 80/443."
+
+      - name: Bloquear acesso administrativo público
+        run: |
+          set -euo pipefail
+          set +x
+          # Esta sonda sai de um runner GitHub-hosted, portanto não pertence à
+          # allowlist administrativa. Qualquer conexão aceita é uma falha no
+          # firewall/allowlist, inclusive se o serviço exige autenticação.
+          violations=0
+          indice=0
+          for ip in ${NODE_IPS}; do
+            indice=$((indice + 1))
+            target="node-${indice}"
+            for port in ${ADMIN_PORTS}; do
+              if nc -z -w 5 "${ip}" "${port}" 2>/dev/null; then
+                violations=$((violations + 1))
+                echo "::error title=Superfície administrativa pública::${target}:${port} aceita conexão externa não allowlisted"
+              fi
+            done
+          done
+          if [ "${indice}" -eq 0 ]; then
+            echo "::error title=Sonda sem alvo::nenhum node auditado na fase administrativa"
+            exit 1
+          fi
+          if [ "${violations}" -gt 0 ]; then
+            echo "::error::${violations} exposição(ões) administrativa(s) detectada(s)"
+            exit 1
+          fi
+          echo "Superfície administrativa conforme em ${indice} node(s): todas as portas auditadas foram filtradas externamente."
