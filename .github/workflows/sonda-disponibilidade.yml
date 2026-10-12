@@ -1,0 +1,96 @@
+# Sonda EXTERNA de disponibilidade (PLAT-158).
+#
+# De 09/10 a 12/10/2026 a API de prd, o Bio, o Plane, o Infisical e o login
+# ficaram em 503 por cerca de três dias e NENHUM alerta chegou: o
+# monitoramento roda dentro da mesma infraestrutura que caiu. Quem observa
+# precisa estar fora do que é observado. (Este arquivo é público: não acrescente
+# aqui nomes de ferramentas internas, IPs ou topologia.)
+#
+# ⚠️ runs-on: ubuntu-latest é OBRIGATÓRIO — NÃO troque por [self-hosted, ...].
+# Os runners self-hosted (ARC) rodam nos nós vigiados: caem junto com o cluster
+# e a sonda some exatamente quando é necessária. O gate
+# tests/gate-vantage-point-externo do desenrolai-infra reprova essa troca.
+#
+# ⚠️ O LOG É PÚBLICO (repositório público, onde Actions hospedado é gratuito).
+# O script imprime só host, código HTTP e latência: nem corpo de resposta, nem
+# IP resolvido, nem stderr do curl. Não acrescente `-v`, `%{remote_ip}` ou
+# `ACTIONS_STEP_DEBUG`.
+#
+# Alerta: além do e-mail padrão de workflow agendado que falha, o step de issue
+# mantém UMA issue aberta enquanto houver serviço fora e a fecha no primeiro
+# run verde (ver scripts/alerta-issue.sh).
+#
+# Variável opcional (Settings → Secrets and variables → Actions → Variables):
+#   SONDA_ALERTA_MENCIONAR — quem mencionar no corpo da issue, ex.: "@fulano".
+#
+# vantage-point: external
+#   ^ marcador lido por tests/gate-vantage-point-externo do desenrolai-infra.
+name: sonda-disponibilidade
+
+on:
+  schedule:
+    # A cada 10 min. O agendamento do GitHub atrasa sob carga; com 3 tentativas
+    # espaçadas de 15 s, um serviço fora é denunciado em ~10-20 min.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+# Dois runs simultâneos poderiam abrir duas issues; em série, o segundo vê a
+# issue do primeiro.
+concurrency:
+  group: sonda-disponibilidade
+  cancel-in-progress: false
+
+jobs:
+  disponibilidade:
+    name: Sonda externa de disponibilidade
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Não derruba o job aqui: o step de issue precisa rodar nos dois casos, e
+      # o último step reprova o job para manter o e-mail padrão do GitHub.
+      - name: Sondar endpoints
+        id: sonda
+        continue-on-error: true
+        env:
+          # <url> <código esperado | 2xx3xx>. Conferido em 12/10/2026 com curl:
+          # os cinco primeiros respondem 200; forge responde 307 para o login
+          # do next-auth (redirect NÃO é seguido).
+          ALVOS: |
+            https://api.desenrol.ai/api/v1/health 200
+            https://api.bio.desenrol.ai/health 200
+            https://plane.desenrol.ai/api/instances/ 200
+            https://secrets.desenrol.ai/api/status 200
+            https://bio.desenrol.ai/ 200
+            https://forge.desenrol.ai/ 2xx3xx
+          TENTATIVAS: "3"
+          INTERVALO: "15"
+          TIMEOUT: "10"
+          SONDA_RESUMO: ${{ runner.temp }}/resumo.md
+        run: bash scripts/sonda-disponibilidade.sh
+
+      - name: Abrir, atualizar ou fechar a issue de alerta
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULTADO: ${{ steps.sonda.outcome == 'success' && 'sucesso' || 'falha' }}
+          FALHAS: ${{ steps.sonda.outputs.falhas }}
+          SONDA_RESUMO: ${{ runner.temp }}/resumo.md
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          MENCIONAR: ${{ vars.SONDA_ALERTA_MENCIONAR }}
+        run: |
+          touch "$SONDA_RESUMO"
+          bash scripts/alerta-issue.sh
+
+      - name: Reprovar o job se a sonda falhou
+        if: steps.sonda.outcome != 'success'
+        run: |
+          echo "::error::sonda de disponibilidade encontrou serviço fora do ar (ver step 'Sondar endpoints')"
+          exit 1

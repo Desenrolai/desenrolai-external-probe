@@ -1,11 +1,18 @@
 # desenrolai-external-probe
 
-Sonda externa da superfície de rede da Desenrolai.
+Sondas externas da Desenrolai: superfície de rede e disponibilidade.
 
-Este repositório contém **um único workflow**. De 6 em 6 horas ele pergunta, de
-fora da nossa rede, se os endereços públicos da nossa infraestrutura respondem
-apenas nas portas que declaramos como públicas — e falha se algo a mais estiver
-aceitando conexão, ou se um ponto de entrada declarado parar de responder.
+Este repositório contém **dois workflows**, ambos rodando de fora da nossa rede:
+
+- `external-surface-audit.yml` — de 6 em 6 horas pergunta se os endereços
+  públicos da nossa infraestrutura respondem apenas nas portas que declaramos
+  como públicas, e falha se algo a mais estiver aceitando conexão, ou se um
+  ponto de entrada declarado parar de responder.
+- `sonda-disponibilidade.yml` — a cada 10 minutos faz um GET nos endpoints
+  públicos críticos (API, Bio, Plane, Infisical, Forge) e falha se algum não
+  responder o código esperado depois de 3 tentativas. Enquanto houver serviço
+  fora, mantém **uma** issue aberta neste repositório, e a fecha sozinha no
+  primeiro run verde. O log mostra só hostname, código HTTP e latência.
 
 ## Por que ele mora num repositório separado
 
@@ -18,6 +25,12 @@ genuinamente externo.
 
 Ele fica aqui, separado e público, porque runners hospedados estão disponíveis
 para repositórios públicos.
+
+## Por que a sonda de disponibilidade também mora aqui
+
+Nosso monitoramento roda dentro da mesma infraestrutura que monitora. Quando
+ela cai inteira, o monitoramento cai junto e ninguém é avisado. Esta sonda é o
+observador que não cai junto.
 
 ## O que este repositório NÃO contém
 
