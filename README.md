@@ -9,7 +9,7 @@ Este repositório contém **dois workflows**, ambos rodando de fora da nossa red
   como públicas, e falha se algo a mais estiver aceitando conexão, ou se um
   ponto de entrada declarado parar de responder.
 - `sonda-disponibilidade.yml` — a cada 10 minutos faz um GET nos endpoints
-  públicos críticos (API, Bio, Plane, Infisical, Forge) e falha se algum não
+  públicos críticos e falha se algum não
   responder o código esperado depois de 3 tentativas. Enquanto houver serviço
   fora, mantém **uma** issue aberta neste repositório, e a fecha sozinha no
   primeiro run verde. O log mostra só hostname, código HTTP e latência.
@@ -34,7 +34,7 @@ observador que não cai junto.
 
 ## O que este repositório NÃO contém
 
-Nenhum endereço, credencial ou detalhe de topologia. Os endereços auditados são
+Nenhum IP, credencial ou topologia interna. Os endereços auditados são
 segredos do repositório, e os logos de execução são públicos — por isso o
 workflow:
 

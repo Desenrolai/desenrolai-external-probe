@@ -11,9 +11,8 @@
 # resolvido (sem `%{remote_ip}` no `-w`), nunca o stderr do curl (que cita o
 # endereço em erros de conexão).
 #
-# Redirect NÃO é seguido: um 302 para a página de login do Cloudflare Access
-# ou um 307 do next-auth contam como o código que são, e quem aceita 3xx diz
-# isso explicitamente com `2xx3xx`.
+# Redirect NÃO é seguido: um 302 ou 307 para uma tela de login conta como o
+# código que é, e quem aceita 3xx diz isso explicitamente com `2xx3xx`.
 set -uo pipefail
 set +x
 

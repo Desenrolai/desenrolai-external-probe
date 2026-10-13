@@ -13,7 +13,9 @@
 #   sucesso, issue aberta      -> comenta "normalizado" e fecha
 #   sucesso, sem issue aberta  -> nada
 #
-# Só issues criadas por github-actions[bot] contam: o repositório é público e
+# A issue é achada pela label exclusiva LABEL, filtrada no servidor: o volume
+# de issues do repositório não afeta a busca e não há página a percorrer. Além
+# da label, só issues de github-actions[bot] contam: o repositório é público e
 # qualquer pessoa pode abrir uma issue com o mesmo título.
 #
 # Entrada (env): GITHUB_REPOSITORY, RESULTADO (sucesso|falha), FALHAS (hosts
@@ -24,6 +26,7 @@ set +x
 
 TITULO="Sonda de disponibilidade: serviço fora do ar"
 BOT="github-actions[bot]"
+LABEL="sonda-disponibilidade"
 REPO="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY ausente}"
 RESULTADO="${RESULTADO:-}"
 FALHAS="${FALHAS:-}"
@@ -46,8 +49,8 @@ trap 'rm -f -- "$tmp/corpo.md" "$tmp/comentario.md"; rmdir -- "$tmp"' EXIT
 # A seleção é em python3 (presente no runner hospedado), não em `--jq`, para o
 # teste do infra exercitar este filtro com um `gh` falso.
 issue_do_bot() {
-  gh api --method GET "repos/${REPO}/issues" -f state="$1" -f sort=updated \
-    -f direction=desc -f per_page=100 \
+  gh api --method GET "repos/${REPO}/issues" -f state="$1" -f labels="$LABEL" \
+    -f sort=updated -f direction=desc -f per_page=20 \
   | TITULO="$TITULO" BOT="$BOT" python3 -c '
 import json, os, re, sys
 for issue in json.load(sys.stdin):
@@ -118,6 +121,12 @@ if [ -n "$fechada" ]; then
   exit 0
 fi
 
+# Primeira issue do repositório: a label ainda não existe. GET antes de POST
+# para não confundir "já existe" (422) com erro real.
+if ! gh api "repos/${REPO}/labels/${LABEL}" >/dev/null 2>&1; then
+  gh api --method POST "repos/${REPO}/labels" -f name="$LABEL" -f color=B60205 \
+    -f description="Alerta da sonda externa de disponibilidade" >/dev/null
+fi
 gh api --method POST "repos/${REPO}/issues" -f title="$TITULO" \
-  -F body=@"$tmp/corpo.md" >/dev/null
+  -f "labels[]=${LABEL}" -F body=@"$tmp/corpo.md" >/dev/null
 echo "Issue criada."
