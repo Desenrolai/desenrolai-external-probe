@@ -1,15 +1,14 @@
-# Auditoria EXTERNA da superfície do cluster (ADR-0004).
+# Auditoria EXTERNA da superfície de rede (ADR-0004).
 #
 # Este é o check AUTORITATIVO sobre "a origem está exposta na internet?". O
-# CronJob in-cluster (desenrolai-infra, k8s/cluster/external-surface-audit)
-# audita a CONFIGURAÇÃO do K8s com exatidão, mas a sonda de rede dele roda
-# DENTRO do cluster — e os nodes têm firewall de host com DROP default, então
-# "alcançável de um pod" não implica "alcançável da internet". Só um ponto de
-# vista fora da rede responde isso.
+# auditor interno confere a CONFIGURAÇÃO com exatidão, mas a sonda de rede dele
+# roda DENTRO da rede auditada — e os nodes têm firewall de host com DROP
+# default, então "alcançável de dentro" não implica "alcançável da internet".
+# Só um ponto de vista fora da rede responde isso.
 #
 # ⚠️ runs-on: ubuntu-latest é OBRIGATÓRIO — NÃO troque por [self-hosted, ...].
-# Os runners self-hosted da Desenrolai rodam no ns arc-runners DENTRO do
-# cluster auditado; usá-los aqui transformaria o teste externo em mais um teste
+# Os runners self-hosted da Desenrolai rodam DENTRO da rede auditada; usá-los
+# aqui transformaria o teste externo em mais um teste
 # interno, e o controle passaria a mentir exatamente no cenário que ele existe
 # para pegar. O gate tests/gate-vantage-point-externo do desenrolai-infra
 # reprova essa troca.
@@ -52,18 +51,27 @@
 #                                 bypass. Default: api-bio-dev.desenrol.ai
 #     SURFACE_AUDIT_PORTS       — (opcional) portas auditadas. Default: 80 443 32080 32443
 #     SURFACE_AUDIT_ADMIN_PORTS — (opcional) portas administrativas que devem
-#                                 permanecer inacessíveis. Default: 22 6443.
+#                                 permanecer inacessíveis.
+#                                 Default: 22 2381 6443 10257 10259.
+#                                 As quatro novas entraram em 26/09/2026,
+#                                 junto com a allowlist que silencia essas mesmas
+#                                 portas no auditor interno: allowlistar uma
+#                                 porta que NENHUM detector externo observa é
+#                                 exatamente o ponto cego que a ordem
+#                                 "sonda primeiro, allowlist depois" existe para
+#                                 impedir. Antes disso a lista era `22 6443`, e só
+#                                 o 6443 das quatro tinha cobertura contínua.
 # vantage-point: external
 #   ^ marcador declarativo lido por tests/gate-vantage-point-externo do
 #     desenrolai-infra. Um workflow com este marcador NÃO pode rodar em runner
-#     self-hosted: os runners self-hosted da Desenrolai vivem dentro do cluster
+#     self-hosted: os runners self-hosted da Desenrolai vivem dentro da rede
 #     que esta sonda audita, e um auditor externo executado lá dentro mede o
 #     próprio lado de dentro e devolve "conforme" sempre.
 name: external-surface-audit
 
 on:
   schedule:
-    # 4x/dia. Topologia de rede muda raramente; o CronJob in-cluster (*/30) é
+    # 4x/dia. Topologia de rede muda raramente; o auditor interno (*/30) é
     # quem dá detecção rápida da mudança de configuração.
     - cron: "0 */6 * * *"
   workflow_dispatch:
@@ -80,7 +88,7 @@ jobs:
       NODE_IPS: ${{ secrets.SURFACE_AUDIT_NODE_IPS }}
       PUBLIC_EDGE_IPS: ${{ secrets.SURFACE_AUDIT_PUBLIC_EDGE_IPS }}
       PORTS: ${{ vars.SURFACE_AUDIT_PORTS || '80 443 32080 32443' }}
-      ADMIN_PORTS: ${{ vars.SURFACE_AUDIT_ADMIN_PORTS || '22 6443' }}
+      ADMIN_PORTS: ${{ vars.SURFACE_AUDIT_ADMIN_PORTS || '22 2381 6443 10257 10259' }}
       HOST: ${{ vars.SURFACE_AUDIT_HOST || 'api-bio-dev.desenrol.ai' }}
     steps:
       # PRIMEIRO STEP, SEMPRE. A máscara só vale do momento do registro em
