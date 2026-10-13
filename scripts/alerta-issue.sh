@@ -127,6 +127,17 @@ if ! gh api "repos/${REPO}/labels/${LABEL}" >/dev/null 2>&1; then
   gh api --method POST "repos/${REPO}/labels" -f name="$LABEL" -f color=B60205 \
     -f description="Alerta da sonda externa de disponibilidade" >/dev/null
 fi
-gh api --method POST "repos/${REPO}/issues" -f title="$TITULO" \
-  -f "labels[]=${LABEL}" -F body=@"$tmp/corpo.md" >/dev/null
+# O GitHub DESCARTA em silêncio a label que o token não pode aplicar e cria a
+# issue mesmo assim. Sem a label, o próximo run não a acha e abre outra: uma
+# issue nova a cada 10 min. Por isso a resposta é conferida, e a falha é alta.
+criada="$(gh api --method POST "repos/${REPO}/issues" -f title="$TITULO" \
+  -f "labels[]=${LABEL}" -F body=@"$tmp/corpo.md")"
+if ! LABEL="$LABEL" python3 -c '
+import json, os, sys
+issue = json.load(sys.stdin)
+sys.exit(0 if os.environ["LABEL"] in [l.get("name") for l in issue.get("labels") or []] else 1)
+' <<<"$criada"; then
+  echo "::error title=Issue sem label::a issue foi criada sem a label ${LABEL}; o próximo run abriria outra"
+  exit 1
+fi
 echo "Issue criada."
